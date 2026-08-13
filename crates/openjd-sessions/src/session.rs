@@ -1425,6 +1425,14 @@ impl Session {
         })?;
         self.environments_entered.pop();
 
+        // Evict the wrap-env file cache unconditionally alongside other
+        // environment teardown. This runs before the exit script so the
+        // cache is cleared even when the exit script fails — a re-entered
+        // environment always gets fresh allocations.
+        if env_has_any_wrap_hook(&env) {
+            self.wrap_env_file_records.remove(identifier);
+        }
+
         let output = if env
             .script
             .as_ref()
@@ -1628,13 +1636,6 @@ impl Session {
 
             String::new()
         };
-
-        // Evict the wrap-env file cache when the wrap environment itself is
-        // exited. The on-disk files are intentionally NOT deleted — they live
-        // in the session files directory and are cleaned up with it.
-        if env_has_any_wrap_hook(&env) {
-            self.wrap_env_file_records.remove(identifier);
-        }
 
         Ok(output)
     }
