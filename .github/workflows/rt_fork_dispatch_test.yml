@@ -1,0 +1,65 @@
+# Fork testing only: never propose this file upstream.
+#
+# A manual trigger for the release-train dispatch of release-plz.yml (the release-train-dispatch job), so a fork
+# can exercise it without publishing crates. The step below is a copy of that job's step: the job's logic is
+# inline YAML, so it cannot be called as a reusable workflow or a shared script. Only the target differs:
+# seant-aws/openjd-model-for-python on rt-ci instead of OpenJobDescription/openjd-model-for-python on mainline.
+# `releases` stands in for release-plz's `releases` output.
+name: "Release train dispatch (fork test)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      releases:
+        description: "release-plz's releases output, as JSON"
+        required: true
+        type: string
+        default: '[{"package_name":"openjd-model","version":"0.16.1"}]'
+
+permissions: {}
+
+jobs:
+  release-train-dispatch:
+    name: Start the openjd-model release train
+    if: ${{ github.repository == 'seant-aws/openjd-rs' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 15
+    steps:
+      - name: Wait for the crates on crates.io, then dispatch
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TRAIN_DISPATCH_TOKEN }}
+          RELEASES_JSON: ${{ inputs.releases }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::RELEASE_TRAIN_DISPATCH_TOKEN is not set; openjd-model-for-python picks the release up on its daily run."
+            exit 0
+          fi
+          # The crates openjd-model-for-python builds on, as <name>/<version> for the crates.io API.
+          mapfile -t crates < <(echo "$RELEASES_JSON" | jq -r '.[]
+            | select(.package_name == "openjd-model" or .package_name == "openjd-expr" or .package_name == "openjd-sessions")
+            | "\(.package_name)/\(.version)"')
+          if [ "${#crates[@]}" -eq 0 ]; then
+            echo "::notice::No crate openjd-model-for-python builds on was released; nothing to dispatch."
+            exit 0
+          fi
+          # The train reads the newest versions from the crates.io API, so wait (at most 10 minutes) until each
+          # released version is visible there. crates.io asks API clients to send a User-Agent.
+          deadline=$((SECONDS + 600))
+          for crate in "${crates[@]}"; do
+            until curl -fs -o /dev/null -A "openjd-rs release workflow (https://github.com/OpenJobDescription/openjd-rs)" \
+                "https://crates.io/api/v1/crates/$crate"; do
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "::warning::$crate is not visible on crates.io after 10 minutes; dispatching anyway."
+                break
+              fi
+              sleep 15
+            done
+          done
+          # A failed dispatch does not fail the release: the daily run of openjd-model-for-python is the backstop.
+          if gh workflow run release_train.yml --repo seant-aws/openjd-model-for-python --ref rt-ci; then
+            echo "Started the release train of openjd-model-for-python for: ${crates[*]}"
+          else
+            echo "::warning::Could not dispatch release_train.yml in openjd-model-for-python; its daily run picks the release up."
+          fi
